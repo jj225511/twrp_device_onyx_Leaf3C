@@ -80,14 +80,17 @@ BOARD_MKBOOTIMG_ARGS += --tags_offset $(BOARD_KERNEL_TAGS_OFFSET)
 BOARD_KERNEL_IMAGE_NAME := Image.gz
 
 # Kernel - prebuilt [MEASURED]
-# kernel + recovery_dtbo extracted from the DEVICE's own recovery_b.
-# Stock recovery_b embeds recovery_dtbo (905996 bytes, mkdtimg dt_table
-# magic d7b7ab1e) after kernel+ramdisk. Missing --recovery_dtbo produces an
-# unbootable image (see A9 tree: "no splash, no adb").
+# kernel + recovery_dtbo + dtb extracted from the DEVICE's own recovery_b.
+# Stock recovery_b layout (header v2): kernel (gzip Image, 41300047) →
+# ramdisk → recovery_dtbo (905996, mkdtimg dt_table d7b7ab1e) → dtb
+# (658721, d00dfeed). mkbootimg REQUIRES a non-empty --dtb for header v2
+# (fails with "DTB image must not be empty" otherwise).
 TARGET_FORCE_PREBUILT_KERNEL := true
 ifeq ($(TARGET_FORCE_PREBUILT_KERNEL),true)
 TARGET_PREBUILT_KERNEL := $(DEVICE_PATH)/prebuilt/kernel
+TARGET_PREBUILT_DTB := $(DEVICE_PATH)/prebuilt/dtb.img
 BOARD_MKBOOTIMG_ARGS += --recovery_dtbo $(DEVICE_PATH)/prebuilt/recovery_dtbo.img
+BOARD_MKBOOTIMG_ARGS += --dtb $(TARGET_PREBUILT_DTB)
 endif
 
 # Partitions [MEASURED]

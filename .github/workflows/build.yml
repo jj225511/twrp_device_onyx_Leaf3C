@@ -54,9 +54,10 @@ jobs:
       - name: Build recovery
         run: |
           cd ~/twrp
+          set -o pipefail
           source build/envsetup.sh
           lunch twrp_Leaf3C-eng
-          mka recoveryimage -j$(nproc) | tail -100
+          mka recoveryimage -j$(nproc) 2>&1 | tail -150
 
       - name: Verify image
         run: |
@@ -70,8 +71,11 @@ jobs:
           assert img[:8] == b'ANDROID!', 'bad magic'
           ksz, kaddr, rsz, raddr, ssz, saddr, tags, ps, hv, osv = struct.unpack('<10I', img[8:48])
           rdtbo = struct.unpack('<I', img[1632:1636])[0]
-          print(f'kernel={ksz} ramdisk={rsz} page={ps} header_v{hv} recovery_dtbo={rdtbo}')
+          dtb = struct.unpack('<I', img[1648:1652])[0]
+          print(f'kernel={ksz} ramdisk={rsz} page={ps} header_v{hv} recovery_dtbo={rdtbo} dtb={dtb}')
           assert rdtbo == 905996, 'recovery_dtbo missing!'
+          assert dtb == 658721, 'dtb missing!'
+          assert len(img) > 30_000_000, 'image truncated!'
           print('VERIFICATION OK')
           EOF
 
