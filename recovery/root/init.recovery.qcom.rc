@@ -1,0 +1,177 @@
+# Copyright (c) 2017-2018,2020 The Linux Foundation. All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#     * Redistributions of source code must retain the above copyright
+#       notice, this list of conditions and the following disclaimer.
+#     * Redistributions in binary form must reproduce the above copyright
+#       notice, this list of conditions and the following disclaimer in the
+#       documentation and/or other materials provided with the distribution.
+#     * Neither the name of The Linux Foundation nor
+#       the names of its contributors may be used to endorse or promote
+#       products derived from this software without specific prior written
+#       permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NON-INFRINGEMENT ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT OWNER OR
+# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+# EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+# PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+# OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+# WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+# OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+# ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+#
+
+on init
+    write /sys/class/backlight/panel0-backlight/brightness 200
+    setprop sys.usb.configfs 1
+
+on property:ro.boot.usbcontroller=*
+    setprop sys.usb.controller ${ro.boot.usbcontroller}
+    write /sys/class/udc/${ro.boot.usbcontroller}/device/../mode peripheral
+
+on fs
+    wait /dev/block/platform/soc/${ro.boot.bootdevice}
+    symlink /dev/block/platform/soc/${ro.boot.bootdevice} /dev/block/bootdevice
+
+# Keymaster version for /data decryption.
+#
+# TWRP reads this (TW_KEYMASTER_VERSION_PROP = "keymaster_ver") when it cannot
+# find the HAL version in the vendor manifest, which is what happened here:
+#   Keymaster_Ver::Unable to find vendor manifest ... and no default value set
+#   Keymaster_Ver::Using keymaster version '' for decryption
+#
+# 4.0 is measured from the device's own /vendor/etc/vintf/manifest.xml:
+#   android.hardware.keymaster @4.0::IKeymasterDevice/default
+on init
+    setprop keymaster_ver 4.1
+
+# Vendor keymaster + gatekeeper HALs, needed to decrypt /data.
+#
+# WHY: /data is FBE v2 with dm-default-key metadata encryption and
+# hardware-wrapped keys. The keys live in the TEE; vold must ask the vendor
+# keymaster HAL to unwrap them. TWRP does not parse /vendor/etc/init/*.rc, so
+# these services are invisible to it and nothing ever starts them -- keystore2
+# then crash-loops (init.svc.keystore2=restarting) and the metadata decrypt
+# quietly does nothing.
+#
+# Definitions copied verbatim from the device's own
+# /vendor/etc/init/android.hardware.{keymaster@4.1,gatekeeper@1.0}-service-qti.rc,
+# with seclabel added (TWRP runs everything as u:r:recovery:s0).
+#
+# TRIGGER: TWRP sets fstab.additional=1 immediately after mounting /vendor and
+# copying its fstab, which is before Decrypt_Data runs -- exactly the window we
+# need. /vendor cannot be mounted from init here because it is a logical
+# partition inside super and the dm devices are set up by TWRP, not init.
+# Once started the HAL keeps /vendor busy, which is harmless: TWRP logs
+# "Failed to unmount '/vendor' (Device or resource busy)" and carries on.
+
+service vendor.keymaster-4-1 /vendor/bin/hw/android.hardware.keymaster@4.1-service-qti
+    class early_hal
+    user root
+    group root system drmrpc
+    seclabel u:r:recovery:s0
+
+service gatekeeper-1-0 /vendor/bin/hw/android.hardware.gatekeeper@1.0-service-qti
+    class early_hal
+    user root
+    group root system
+    seclabel u:r:recovery:s0
+
+on property:fstab.additional=1
+    start vendor.keymaster-4-1
+    start gatekeeper-1-0
+
+service vendor.keymaster-4-0 /vendor/bin/hw/android.hardware.keymaster@4.0-service-qti
+    class early_hal
+    user root
+    group root system drmrpc
+    seclabel u:r:recovery:s0
+
+on property:fstab.additional=1
+    start vendor.keymaster-4-0
+
+# ROOT CAUSE FIX (2026-08-10)
+#
+# The QTI keymaster HAL does NOT register with hwservicemanager until the
+# QSEECom TZ listeners are up. libkeymasterdeviceutils.so calls
+#   android::base::WaitForPropertyCreation("vendor.sys.listeners.registered")
+# with NO timeout, inside CreateKeymasterDevice(), i.e. BEFORE
+# registerAsService(). Without qseecomd that property is never created, so the
+# HAL sits single-threaded in a nanosleep poll loop forever and every
+# getService() on the client side blocks forever.
+#
+# Stock does this in /vendor/etc/init/qseecomd.rc + init.target.rc:
+#   on init: wait /dev/qseecom; start vendor.qseecomd; start keymaster-4-0
+service vendor.qseecomd /vendor/bin/qseecomd
+    class early_hal
+    user root
+    group root
+    seclabel u:r:recovery:s0
+
+on property:fstab.additional=1
+    start vendor.qseecomd
+
+# TWRP's ueventd never reads /vendor/ueventd.rc, so the TZ device nodes keep
+# their default 0600 root:root instead of stock's:
+#   /dev/ion 0664 system system ; /dev/qseecom 0660 system drmrpc ;
+#   /dev/smcinvoke 0660 system drmrpc
+# The QTI keymaster HAL SIGABRTs when it cannot open them.
+on init
+    chown system system /dev/ion
+    chmod 0666 /dev/ion
+    chown system drmrpc /dev/qseecom
+    chmod 0666 /dev/qseecom
+    chown system drmrpc /dev/smcinvoke
+    chmod 0666 /dev/smcinvoke
+
+# Minimal logd replacement: binds /dev/socket/logdw and dumps every liblog
+# record to /tmp/logdw.txt. Recovery has no logd, so Rust panics in keystore2
+# and every libbase LOG(FATAL) are otherwise invisible.
+service logdstub /system/bin/logdstub
+    class core
+    user root
+    group root
+    seclabel u:r:recovery:s0
+
+on early-init
+    start logdstub
+
+# FBE per-file keys: vold's installProvisioningKey() does
+#   keyctl_search(KEY_SPEC_SESSION_KEYRING, "keyring", "fscrypt", 0)
+# and bails with "Unable to find device keyring: Required key not available"
+# if that named keyring does not exist. On a normal boot AOSP init creates it
+# via libfscrypt's fscrypt_install_keyring(); TWRP's init never does. The
+# FS_IOC_ADD_ENCRYPTION_KEY ioctl itself SUCCEEDS -- installKey() then fails on
+# the provisioning-key step, and TWRP's retry hack flips use_hw_wrapped_key,
+# so the retry legitimately fails with EINVAL. This creates the keyring in
+# init's session keyring, which every init child (including recovery) shares.
+service fscryptring /system/bin/fscryptring quiet
+    class core
+    user root
+    group root
+    oneshot
+    seclabel u:r:recovery:s0
+
+on early-init
+    start fscryptring
+
+
+# Boot control HAL, needed by fastbootd for slot-count / current-slot.
+#
+# fastbootd caches the HAL at construction (FastbootDevice's boot_control_hal_),
+# so hwservicemanager's lazy-start always loses the race: fastbootd reports
+# slot-count 0 and current-slot "", the host never appends _a, and
+# `fastboot flash system <gsi>` cannot resolve the partition.
+#
+# Start it at post-fs instead -- after `on fs` creates the
+# /dev/block/bootdevice symlink, and long before anything touches fastboot.
+# The impl (/vendor/lib64/hw/android.hardware.boot@1.0-impl-1.1-qti.so plus
+# libboot_control_qti.so and librecovery_updater.so) is shipped in the RAMDISK
+# /vendor, because process_fastbootd_mode() calls Unmap_Super_Devices() and the
+# real /vendor is gone by the time fastbootd runs.
+on post-fs
+    start boot-hal-1-1

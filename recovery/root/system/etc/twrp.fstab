@@ -1,0 +1,49 @@
+# BOOX Leaf3C — TWRP fstab
+#
+# Partition layout measured on device: /dev/block/by-name (85 entries, 50
+# A/B pairs), internal storage is eMMC (mmcblk0), external microSD is
+# mmcblk1 (no UFS LUNs — unlike the A9, USB mass storage enumerates as sda).
+#
+# mount point       fstype    device                                        flags
+
+# Logical partitions in super
+/system             ext4      system                                        flags=display="System";logical;slotselect;fsflags=ro
+/system_ext         ext4      system_ext                                    flags=display="System ext";logical;slotselect;fsflags=ro
+/vendor             ext4      vendor                                        flags=display="Vendor";logical;slotselect;fsflags=ro;mounttodecrypt
+/product            ext4      product                                        flags=display="Product";logical;slotselect;fsflags=ro
+
+# Data and metadata
+# /data — FBE v2 + dm-default-key metadata encryption, wrappedkey_v0.
+# The crypto flags (fileencryption=/metadata_encryption=/keydirectory=) are
+# in recovery.fstab; partition.cpp picks the decryption path on
+# Key_Directory.empty(), so they must not be dropped.
+/data               f2fs      /dev/block/bootdevice/by-name/userdata        flags=display="Data";backup=1;wipeingui
+/metadata           ext4      /dev/block/bootdevice/by-name/metadata        flags=display="Metadata";backup=1
+/persist            ext4      /dev/block/bootdevice/by-name/persist         flags=display="Persist";backup=1
+/onyxconfig         ext4      /dev/block/bootdevice/by-name/onyxconfig      flags=display="Onyx Config";backup=1
+
+# Slotted images
+/boot               emmc      /dev/block/bootdevice/by-name/boot            flags=display="Boot";slotselect;backup=1
+/recovery           emmc      /dev/block/bootdevice/by-name/recovery        flags=display="Recovery";slotselect;backup=1
+/dtbo               emmc      /dev/block/bootdevice/by-name/dtbo            flags=display="DTBO";slotselect;backup=1
+/vbmeta             emmc      /dev/block/bootdevice/by-name/vbmeta          flags=display="Vbmeta";slotselect;backup=1
+/vbmeta_system      emmc      /dev/block/bootdevice/by-name/vbmeta_system   flags=display="Vbmeta system";slotselect;backup=1
+/modem              emmc      /dev/block/bootdevice/by-name/modem           flags=display="Modem";slotselect;backup=1
+
+# Whole super, for imaging
+/super              emmc      /dev/block/bootdevice/by-name/super           flags=display="Super";backup=1
+
+# Misc — backup=1 REQUIRED with super: misc carries the Virtual A/B message
+# at offset 32768 (snapshot/merge state). Restoring super without misc can
+# leave the device unbootable. misc is VOLATILE (first 2048 bytes = BCB,
+# rewritten on every reboot-to-recovery). If a restored misc loops into
+# recovery, zero ONLY the first 2048 bytes:
+#   dd if=/dev/zero of=/dev/block/bootdevice/by-name/misc bs=1 count=2048 conv=notrunc
+/misc               emmc      /dev/block/bootdevice/by-name/misc            flags=display="Misc";backup=1
+
+# Removable storage
+# Internal storage is eMMC (mmcblk0), microSD is mmcblk1 — there are NO
+# UFS LUNs, so the first USB mass-storage device is sda (on the A9/UFS it
+# had to be sdg; sda1 there would have been the ssd partition).
+/external_sd        vfat      /dev/block/mmcblk1p1                          flags=display="MicroSD";storage;wipeingui;removable
+/usb_otg            vfat      /dev/block/sda1                               flags=display="USB-OTG";storage;wipeingui;removable

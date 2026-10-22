@@ -1,0 +1,82 @@
+name: Build TWRP Leaf3C
+
+on:
+  workflow_dispatch:
+    inputs:
+      manifest_branch:
+        description: "TWRP minimal manifest branch"
+        required: false
+        default: "twrp-12.1"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Maximize build space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /usr/local/lib/android /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost /usr/lib/jvm || true
+          sudo docker image prune --force || true
+          df -h /
+
+      - name: Install repo tool
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq repo aria2 python-is-python3
+
+      - name: Initialize TWRP minimal manifest
+        run: |
+          mkdir -p ~/twrp && cd ~/twrp
+          git config --global user.name "builder"
+          git config --global user.email "builder@example.com"
+          repo init -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git -b "${{ github.event.inputs.manifest_branch }}" --depth=1
+
+      - name: Repo sync
+        run: |
+          cd ~/twrp
+          repo sync -c -j4 --no-clone-bundle --no-tags --fail-fast
+          df -h /
+
+      - name: Checkout device tree
+        uses: actions/checkout@v4
+        with:
+          path: device-tree
+
+      - name: Place device tree
+        run: |
+          cd ~/twrp
+          mkdir -p device/onyx
+          cp -a "$GITHUB_WORKSPACE/device-tree" device/onyx/Leaf3C
+          rm -rf device/onyx/Leaf3C/.git
+          ls device/onyx/Leaf3C
+
+      - name: Build recovery
+        run: |
+          cd ~/twrp
+          source build/envsetup.sh
+          lunch twrp_Leaf3C-eng
+          mka recoveryimage -j$(nproc) | tail -100
+
+      - name: Verify image
+        run: |
+          cd ~/twrp
+          IMG=$(find out -name 'recovery.img' -type f | head -1)
+          echo "image: $IMG"
+          ls -la "$IMG"
+          python3 - "$IMG" << 'EOF'
+          import struct, sys
+          img = open(sys.argv[1],'rb').read()
+          assert img[:8] == b'ANDROID!', 'bad magic'
+          ksz, kaddr, rsz, raddr, ssz, saddr, tags, ps, hv, osv = struct.unpack('<10I', img[8:48])
+          rdtbo = struct.unpack('<I', img[1632:1636])[0]
+          print(f'kernel={ksz} ramdisk={rsz} page={ps} header_v{hv} recovery_dtbo={rdtbo}')
+          assert rdtbo == 905996, 'recovery_dtbo missing!'
+          print('VERIFICATION OK')
+          EOF
+
+      - name: Upload recovery image
+        uses: actions/upload-artifact@v4
+        with:
+          name: twrp-Leaf3C
+          path: ~/twrp/out/target/product/Leaf3C/recovery.img
